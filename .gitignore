@@ -1,5 +1,7 @@
 rai-python-teaching
 
+.vscode/
+
 %% compile temporaries
 /build
 *.o
