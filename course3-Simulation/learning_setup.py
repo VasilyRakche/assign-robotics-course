@@ -100,19 +100,21 @@ class Game:
     def __init__(self, world_configuration = ABS_PATH+ "/scenarios/pushSimWorld.g"):
         self.C = ry.Config()
         self.C.addFile(world_configuration)
-        self.S = self.C.simulation(ry.SimulatorEngine.bullet, True)
+        self.S = self.C.simulation(ry.SimulatorEngine.bullet, False)
+        self.S_verbose = self.C.simulation(ry.SimulatorEngine.bullet, True)
         
         self.tau = 0.02
         self.box = self.C.getFrame("box")
         self.box_t = self.C.getFrame("box_t")
         self.ball = self.C.getFrame("ball")
-        self.r_max = 2.
+        self.r_max = 2.4
         self.disc_r = .3
         self.disc_angle = .5 # TODO: define meaningful angle
         self.state = 3*[0]
         self.start_r = 0
         self.start_angle = 0
         self.score = 0
+        self.r_target_hits = 0
         
         # random initialization 
         self.reset()
@@ -124,20 +126,27 @@ class Game:
         self.state = [x_diff, y_diff, z_angle_diff]
 
         
-    def step(self, final_move):
+    def step(self, action, show_simulation = False):
         reward = 0
         game_over = False
 
-        start, direction = start_direction(self.box,np.nonzero(final_move)[0][0])
+        start, direction = start_direction(self.box,np.nonzero(action)[0][0])
         self.ball.setPosition(start)
-        self.S.setState(self.C.getFrameState())
-        
-        # Updating the environment
-        # self.S.step([], 0,  ry.ControlMode.none)
 
-        for t in range(3):
-            time.sleep(self.tau)
-            self.S.step(direction, self.tau,  ry.ControlMode.velocity)
+        # Show output in simulation
+        if show_simulation:
+            self.S_verbose.setState(self.C.getFrameState())
+
+            for t in range(3):
+                time.sleep(self.tau)
+                self.S_verbose.step(direction, self.tau,  ry.ControlMode.velocity)
+
+        else:
+            self.S.setState(self.C.getFrameState())
+
+            for t in range(3):
+                # time.sleep(self.tau)
+                self.S.step(direction, self.tau,  ry.ControlMode.velocity)
         
         
         self.calculate_state();
@@ -150,31 +159,45 @@ class Game:
         
         if r >= self.r_max: 
             reward = -3.
+            print("Distance too large: ", r)
             game_over = True        
             
-        elif dr < self.prev_dr:
+        elif (dr - self.prev_dr) > 2 :
+            game_over = True
             #TODO: dangle adding strategy
-            reward = 0.1*(self.prev_dr - dr)
-            print("Positive reward for position increase: ", reward)
+            reward = -1
+            print("Negative reward for position distance increase: ", reward)
             self.prev_dr = dr
             
         elif r < 0.1:
-            print("Scored position: ", r)
-            game_over = True
-            reward = 10 - abs(dangle)
+            self.r_target_hits += 1
+            # Define desired more precise positioning 
+            if r < 0.01 or self.r_target_hits > 10:
+                print("Scored position: ", r)
+                game_over = True
+                # Introduce better rewards for more precise positioning 
+                reward = 10 - abs(dangle) - r*5
             
-         
         # penalize angle difference increase 
-        if abs(self.prev_dangle) < abs(dangle):
-            reward += -.5
+        if (abs(dangle) - abs(self.prev_dangle)) > 2 :
+            game_over = True
+            reward = -1
             print("Negative reward for angle increase: ", reward)
             self.prev_dangle = dangle
             
         self.score += reward
 
-        if (self.score) < -1.5:
-            print("Score unaceptably low: ",self.score )
-            game_over = True
+        # Bias for movements towards the goal
+        # update discrete states:
+        if abs(dangle) < abs(self.prev_dangle):
+            self.prev_dangle = dangle
+
+        if dr <  self.prev_dr:
+            self.prev_dr = dr
+
+        # reset variables
+        if game_over:
+            self.r_target_hits = 0
 
         return reward, game_over, self.score
         
@@ -222,7 +245,7 @@ class LinearSchedule(object):
 class Worker:
     def __init__(self, 
                     # epsilon params
-                    fraction_eps = 0.01, 
+                    fraction_eps = 0.004, 
                     initial_eps = .3, 
                     final_eps = 0.05, 
 
@@ -230,27 +253,35 @@ class Worker:
                     max_steps = 10_000_000, 
                     gamma = 0.97, 
                     learning_rate = 1e-3, 
-                    learning_start_itr = 0, 
-                    train_q_freq = 50,
+                    learning_start_itr = 100, 
+                    target_q_update_freq = 600,
+                    train_q_freq = 2,
 
                     # memory 
-                    memory_len = 100_000,
-                    batch_size = 1000,
+                    memory_len = 1_000, #10_000 in google code
+                    batch_size = 64,
 
-                    #network
-                    layers_sizes = [3, 256, 12],
+                    # network
+                    layers_sizes = [3, 256, 64, 12],
 
-                    #logging
+                    # logging
                     log_freq = 100,
-                    log_dir = "data/local/game",
+                    log_dir = "data/local/game2",
+                    
+                    # simulation verbose
+                    sim_verbose_freq_episodes = 20
                 ):
 
         lib.logger.session(log_dir).__enter__()
+        self.target_q_update_freq = target_q_update_freq
+        self.learning_start_itr = learning_start_itr
         self.log_freq = log_freq
         self.train_q_freq = train_q_freq
         self.layers_sizes = layers_sizes
         self.act_dim = self.layers_sizes[-1]
         self.max_steps = max_steps
+        self.sim_verbose = True
+        self.sim_verbose_freq_episodes = sim_verbose_freq_episodes
 
         # Learning Agent 
         self.agent = Agent(
@@ -287,14 +318,13 @@ class Worker:
         return act
 
     def train(self):
-        plot_scores = []
-        plot_mean_scores = []
         episode_rewards = []
-        total_score = 0
-        record = 0     
         log_itr = 0
+        episodes = 0
+        last_game_itr = 0
+        episode_return_mean_record = 0
 
-        l_episode_return = deque([], maxlen=10)
+        l_episode_return = deque([], maxlen=30)
         l_tq_squared_error = deque(maxlen=50)   
         
         for itr in range(self.max_steps):
@@ -305,53 +335,60 @@ class Worker:
             act = self.eps_greedy(state_old, self.exploration.value(itr))
 
             # perform move and get new state
-            reward, done, score = self.game.step(act)
+            reward, done, score = self.game.step(act, self.sim_verbose)
             state_new = self.game.get_state()
 
             episode_rewards.append(reward)
 
             # train short memory
-            self.agent.train_short_memory(state_old, act, reward, state_new, done)
+            # self.agent.train_short_memory(state_old, act, reward, state_new, done)
 
             # remember
             self.agent.remember(state_old, act, reward, state_new, done)
 
             if done:
-                # train long memory, plot result
-    #             print("done routine")
                 self.game.reset()
+
+                # turn off simulation output if it was on
+                if self.sim_verbose:
+                    self.sim_verbose = False               
+
+                # Print basic game statistics
+                print("~~~~~~~~~~ Game ~~~~~~~~~~")
+                print('Running steps:           \t', itr - last_game_itr)
+
+                # save to indicate how many iterations for start to finish of the game:
+                last_game_itr = itr
+                
+                # Reward statistics
                 episode_return = np.sum(episode_rewards)
+                episodes +=1
                 episode_rewards = []
-
-                if score > record:
-                    record = score
-                    self.agent.model.save()
-
+                print('Reward:                  \t', episode_return)
+                
                 l_episode_return.append(episode_return)
 
+                # Save the model if the preformance increased
+                episode_return_mean = math.ceil(np.mean(l_episode_return)*10)/10
+
+                if  episode_return_mean > episode_return_mean_record:
+                    episode_return_mean_record = episode_return_mean
+                    self.agent.model.save()
+                    print('New mean reward record:  \t', episode_return_mean_record)
+
+                print("~~~~~~~~~~~~~~~~~~~~~~~~~~")
+
+                if episodes % self.sim_verbose_freq_episodes == 0:
+                    self.sim_verbose = True
+
+            if itr % self.target_q_update_freq == 0 and itr > self.learning_start_itr:
+                self.agent.trainer.update_target_model()
+
+            if itr % self.train_q_freq == 0 and itr > self.learning_start_itr:
                 td_squared_error = self.agent.train_long_memory().data
-
                 l_tq_squared_error.append(td_squared_error)
-                print("DONE!!!")
-                print('Iteration: ', log_itr)
-                print('Steps: ', itr)
-                print('Epsilon: ', self.exploration.value(itr))
-                print('Episodes: ', len(l_episode_return))
-                print('Reward: ', episode_return)
 
-                # print('Game', itr, 'Score', score, 'Record:', record)
-
-                # plot_scores.append(score)
-                # total_score += score
-                # mean_score = total_score / itr
-                # plot_mean_scores.append(mean_score)
-                # plot(plot_scores, plot_mean_scores)
-
-            # if itr % self.train_q_freq == 0 and itr > self.learning_start_itr:
-            #     td_squared_error = self.agent.train_long_memory()
-            #     l_tq_squared_error.append(td_squared_error)
-
-            if (itr + 1) % self.log_freq == 0:
+            if (itr + 1) % self.log_freq == 0 and len(l_episode_return) > 5:
                 log_itr += 1
                 lib.logger.logkv('Iteration', log_itr)
                 lib.logger.logkv('Steps', itr)
@@ -361,6 +398,70 @@ class Worker:
                 lib.logger.logkv('TDError^2', np.mean(l_tq_squared_error))
                 lib.logger.dumpkvs()
 
+    def train_warm_start(self, model_filename = 'model.pth'):
+        self.agent.trainer.model.restore_from_saved(model_filename)
+        self.agent.trainer.update_target_model()
+        self.train()
+
+    def evaluate_model(self, model_filename = 'model.pth'):
+        self.agent.trainer.model.restore_from_saved(model_filename)
+        # Model should be switched to evaluation model and back when training is desired: mode.train()
+        self.agent.trainer.model.eval() 
+
+        episode_rewards = []
+        episodes = 0
+        last_game_itr = 0
+
+        l_episode_return = deque([], maxlen=30)
+
+        for itr in range(self.max_steps):
+            state = self.game.get_state()
+            act = [0]*self.act_dim
+
+            state0 = torch.tensor(state, dtype=torch.float)
+            prediction = self.agent.model(state0)
+            move = torch.argmax(prediction).item()
+            act[move] = 1
+
+            # perform move
+            reward, done, score = self.game.step(act, True)
+
+            episode_rewards.append(reward)
+
+            if done:
+                self.game.reset()
+
+                # Print basic game statistics
+                print("~~~~~~~~~~ Game ~~~~~~~~~~")
+                print('Running steps:           \t', itr - last_game_itr)
+
+                # save to indicate how many iterations for start to finish of the game:
+                last_game_itr = itr
+                
+                # Reward statistics
+                episode_return = np.sum(episode_rewards)
+                episodes +=1
+                episode_rewards = []
+                print('Reward:                  \t', episode_return)
+                
+                l_episode_return.append(episode_return)
+
+                # Save the model if the preformance increased
+                episode_return_mean = math.ceil(np.mean(l_episode_return)*10)/10.
+
+                print('Mean reward:             \t', episode_return_mean)
+
+                print("~~~~~~~~~~~~~~~~~~~~~~~~~~")
+
+
+            
+EVALUATION = False
+WARM_START = True
 if __name__ == "__main__":
     setup = Worker()
-    setup.train()
+    if EVALUATION:
+        setup.evaluate_model(model_filename = 'model_saved2.pth')
+    elif WARM_START:
+        setup.train_warm_start(model_filename = 'model_saved2.pth')
+    else:
+        setup.train()
