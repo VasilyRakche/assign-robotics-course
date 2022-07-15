@@ -92,8 +92,7 @@ def start_direction(frame, code):
     
     pos = frame.getPosition()[:2] + R.dot(rel_start)
     direction = R.dot(direction)
-    return list(pos) + [frame.getPosition()[2]] ,  list(direction) + [0.]
-    
+    return list(pos) + [frame.getPosition()[2]] ,  list(direction) + [0.]  
 
 class Game:
 
@@ -107,31 +106,40 @@ class Game:
         self.box = self.C.getFrame("box")
         self.box_t = self.C.getFrame("box_t")
         self.ball = self.C.getFrame("ball")
-        self.r_max = 2.4
-        self.disc_r = .3
-        self.disc_angle = .5 # TODO: define meaningful angle
-        self.state = 3*[0]
+        self.max_r = 2.4
+        self.disc_r = .05
+        self.disc_r_ball = .2
+        self.disc_angle = .3 # TODO: define meaningful angle
+        self.state = 5*[0]
         self.start_r = 0
         self.start_angle = 0
         self.score = 0
         self.r_target_hits = 0
-        
+        self.max_dangle_dis = 4
+        self.max_dr_dis = 16
+        self.max_r_ball_box = .9
+        self.min_r_target_hits = 0
+        self.initial_reward_for_good_guess = .3
+
         # random initialization 
         self.reset()
         
     def calculate_state(self):
-        x_diff, y_diff = get_xy_position_diff(self.box_t, self.box)
+        x_diff_box, y_diff_box = get_xy_position_diff(self.box_t, self.box)
+        x_diff_ball, y_diff_ball = get_xy_position_diff(self.box, self.ball)
         z_angle_diff = get_z_angle_diff(self.box_t, self.box)
         
-        self.state = [x_diff, y_diff, z_angle_diff]
+        self.state = [x_diff_box, y_diff_box, z_angle_diff, x_diff_ball, y_diff_ball]
 
         
-    def step(self, action, show_simulation = False):
+    def step(self, action, action_decoder, show_simulation = False):
         reward = 0
         game_over = False
 
-        start, direction = start_direction(self.box,np.nonzero(action)[0][0])
-        self.ball.setPosition(start)
+        # start, direction = start_direction(self.box, np.nonzero(action)[0][0])
+        # self.ball.setPosition(start)
+
+        direction = action_decoder(np.nonzero(action)[0][0])
 
         # Show output in simulation
         if show_simulation:
@@ -149,74 +157,113 @@ class Game:
                 self.S.step(direction, self.tau,  ry.ControlMode.velocity)
         
         
-        self.calculate_state();
+        self.calculate_state()
         
         r = (self.state[0]**2 + self.state[1]**2)**.5
         
         dr = int(r / self.disc_r)
         dangle = int(self.state[2] / self.disc_angle)
+
+        r_ball_box = (self.state[3]**2 + self.state[4]**2)**.5
         
+        dr_ball = int(r_ball_box / self.disc_r_ball)
+
+        if r_ball_box >= self.max_r_ball_box:
+            ## Ball too far away FROM THE BOX
+            reward = -0.7
+            print("Ball drifted: ", r_ball_box)
+            game_over = True                
         
-        if r >= self.r_max: 
+        elif r >= self.max_r: 
+            ## too big DISTANCE FROM TARGET
             reward = -3.
             print("Distance too large: ", r)
             game_over = True        
             
-        elif (dr - self.prev_dr) > 2 :
+        elif (dr - self.prev_dr) > self.max_dr_dis :
+            ## too big DISTANCE FROM LAST ACHIEVEMENT
             game_over = True
-            #TODO: dangle adding strategy
-            reward = -1
+            reward = -0.01
             print("Negative reward for position distance increase: ", reward)
             self.prev_dr = dr
+
+        elif (abs(dangle) - abs(self.prev_dangle)) > self.max_dangle_dis :
+            ## too big ANGLE INCREASE FROM LAST ACHIEVEMENT
+            game_over = True
+            reward = -0.01
+            print("Negative reward for angle increase: ", reward)
+            self.prev_dangle = dangle
             
-        elif r < 0.1:
+        elif r < 0.4:
+            ## Score
             self.r_target_hits += 1
             # Define desired more precise positioning 
-            if r < 0.01 or self.r_target_hits > 10:
+            if r < 0.01 or self.r_target_hits > self.min_r_target_hits:
                 print("Scored position: ", r)
                 game_over = True
                 # Introduce better rewards for more precise positioning 
                 reward = 10 - abs(dangle) - r*5
-            
-        # penalize angle difference increase 
-        if (abs(dangle) - abs(self.prev_dangle)) > 2 :
-            game_over = True
-            reward = -1
-            print("Negative reward for angle increase: ", reward)
-            self.prev_dangle = dangle
-            
-        self.score += reward
+
+        
+        # if dr_ball < self.prev_dr_ball:
+        #     reward += 0.5
+        #     self.prev_dr_ball = dr_ball
+        
+        
 
         # Bias for movements towards the goal
         # update discrete states:
         if abs(dangle) < abs(self.prev_dangle):
+            reward += self.initial_reward_for_good_guess
             self.prev_dangle = dangle
 
-        if dr <  self.prev_dr:
+        if dr < self.prev_dr:
+            # positive reward
+            reward += self.prev_dr - dr 
             self.prev_dr = dr
+        
 
         # reset variables
         if game_over:
             self.r_target_hits = 0
+
+        self.score += reward
 
         return reward, game_over, self.score
         
     def get_state(self):
         return self.state
     
-    def reset(self):
+    def reset(self, random_box_pos = True, random_ball_pos = True):
         #define the new state of the box to be somewhere around the target:
-        new_state = np.array(self.box_t.getPosition())+np.array([3*np.random.rand() - 1.5, 3*np.random.rand() - 1.5, 0])
-        
-        self.box.setQuaternion(psi_to_quat(2*math.pi*np.random.rand()))
-        self.box.setPosition(new_state)
+        if random_box_pos:
+            new_state = np.array(self.box_t.getPosition())+np.array([3*np.random.rand() - 1.5, 3*np.random.rand() - 1.5, 0])
+
+            self.box.setQuaternion(psi_to_quat(2*math.pi*np.random.rand()))
+            self.box.setPosition(new_state)
+
+        # define ball state around the box
+        if random_ball_pos:
+            psi = 2*math.pi*np.random.rand()
+            R = np.array([[math.cos(psi), -math.sin(psi)],
+                        [math.sin(psi), math.cos(psi)]])
+
+            ball_position_rel = np.array([.23 + np.random.rand()*.1, 0])
+            ball_position_rel = R.dot(ball_position_rel)
+            new_state_ball = np.array(self.box.getPosition())+np.array(list(ball_position_rel) + [0.])
+            self.ball.setPosition(new_state_ball)
+
         self.S.setState(self.C.getFrameState())
-        
-        self.calculate_state();
+
+        self.calculate_state()
         
         r = (self.state[0]**2 + self.state[1]**2)**.5
+        r_ball = (self.state[3]**2 + self.state[4]**2)**.5
         
         self.prev_dr = int(r / self.disc_r)
+        self.init_dr = self.prev_dr
+        # self.prev_dr = dr
+        self.prev_dr_ball = int(r_ball / self.disc_r_ball)
         self.prev_dangle = int(self.state[2] / self.disc_angle)
         
         self.score = 0
@@ -245,12 +292,13 @@ class LinearSchedule(object):
 class Worker:
     def __init__(self, 
                     # epsilon params
-                    fraction_eps = 0.004, 
-                    initial_eps = .3, 
+                    fraction_eps = 0.008, 
+                    initial_eps = .5, 
                     final_eps = 0.05, 
 
                     # learning 
                     max_steps = 10_000_000, 
+                    max_game_itr = 2000,
                     gamma = 0.97, 
                     learning_rate = 1e-3, 
                     learning_start_itr = 100, 
@@ -262,14 +310,14 @@ class Worker:
                     batch_size = 64,
 
                     # network
-                    layers_sizes = [3, 256, 64, 12],
+                    layers_sizes = [5, 256, 64, 18],
 
                     # logging
                     log_freq = 100,
-                    log_dir = "data/local/game2",
+                    log_dir = "data/local/game_ball1",
                     
                     # simulation verbose
-                    sim_verbose_freq_episodes = 20
+                    sim_verbose_freq_episodes = 1
                 ):
 
         lib.logger.session(log_dir).__enter__()
@@ -280,6 +328,7 @@ class Worker:
         self.layers_sizes = layers_sizes
         self.act_dim = self.layers_sizes[-1]
         self.max_steps = max_steps
+        self.max_game_itr = max_game_itr
         self.sim_verbose = True
         self.sim_verbose_freq_episodes = sim_verbose_freq_episodes
 
@@ -301,6 +350,18 @@ class Worker:
             initial_p=initial_eps,
             final_p=final_eps)
 
+    def dec_ball_action(self, encoded_action):
+        vel = 1
+
+        psi = (2*math.pi/self.act_dim)* encoded_action
+        R = np.array([[math.cos(psi), -math.sin(psi)],
+                     [math.sin(psi), math.cos(psi)]])
+
+        direction = np.array([vel, 0])
+        direction = list(R.dot(direction)) + [0.] 
+
+        # reduce to 0. in case really small number
+        return [0. if abs(d) < 1e-10 else d for d in direction] 
 
     def eps_greedy(self, state, epsilon):
         act = [0]*self.act_dim
@@ -335,7 +396,7 @@ class Worker:
             act = self.eps_greedy(state_old, self.exploration.value(itr))
 
             # perform move and get new state
-            reward, done, score = self.game.step(act, self.sim_verbose)
+            reward, done, score = self.game.step(act, self.dec_ball_action, self.sim_verbose)
             state_new = self.game.get_state()
 
             episode_rewards.append(reward)
@@ -346,8 +407,11 @@ class Worker:
             # remember
             self.agent.remember(state_old, act, reward, state_new, done)
 
-            if done:
-                self.game.reset()
+            if done or (itr-last_game_itr)>self.max_game_itr:
+                if reward == 0:
+                    self.game.reset(random_box_pos=False)
+                else:
+                    self.game.reset()
 
                 # turn off simulation output if it was on
                 if self.sim_verbose:
@@ -393,7 +457,7 @@ class Worker:
                 lib.logger.logkv('Iteration', log_itr)
                 lib.logger.logkv('Steps', itr)
                 lib.logger.logkv('Epsilon', self.exploration.value(itr))
-                lib.logger.logkv('Episodes', len(l_episode_return))
+                lib.logger.logkv('Episodes', episodes)
                 lib.logger.logkv('AverageReturn', np.mean(l_episode_return))
                 lib.logger.logkv('TDError^2', np.mean(l_tq_squared_error))
                 lib.logger.dumpkvs()
@@ -424,7 +488,7 @@ class Worker:
             act[move] = 1
 
             # perform move
-            reward, done, score = self.game.step(act, True)
+            reward, done, score = self.game.step(act, self.dec_ball_action, True)
 
             episode_rewards.append(reward)
 
@@ -462,6 +526,6 @@ if __name__ == "__main__":
     if EVALUATION:
         setup.evaluate_model(model_filename = 'model_saved2.pth')
     elif WARM_START:
-        setup.train_warm_start(model_filename = 'model_saved2.pth')
+        setup.train_warm_start(model_filename = 'model_saved4.pth')
     else:
         setup.train()
