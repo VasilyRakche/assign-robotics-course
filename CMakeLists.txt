@@ -38,6 +38,7 @@ link_directories(
 file(GLOB SRC_Core rai/rai/Core/*.cpp)
 file(GLOB SRC_Optim rai/rai/Optim/*.cpp)
 file(GLOB SRC_Geo rai/rai/Geo/*.cpp)
+file(GLOB SRC_GeoCcd rai/rai/Geo/ccd/*.c)
 file(GLOB SRC_GeoGJK rai/rai/Geo/GJK/*.c)
 file(GLOB SRC_GeoPly rai/rai/Geo/ply/*.c)
 file(GLOB SRC_Algo rai/rai/Algo/*.cpp)
@@ -58,6 +59,7 @@ add_library(rai SHARED
   ${SRC_Core}
   ${SRC_Optim}
   ${SRC_Geo}
+  ${SRC_GeoCcd}
   ${SRC_GeoGJK}
   ${SRC_GeoPly}
   ${SRC_Algo}
