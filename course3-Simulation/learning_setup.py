@@ -1,5 +1,5 @@
 import sys
-ABS_PATH = "/home/vasko/Documents/TUB3/AI_Robotics/robotics-course"
+ABS_PATH = "/home/vasko/Documents/TUB3/AI_Robotics/robotics-course-prev"
 sys.path.append(ABS_PATH+'/build')
 import numpy as np
 import libry as ry
@@ -49,9 +49,9 @@ def start_direction(frame, code):
     
     R = np.array([[math.cos(psi), -math.sin(psi)],
                      [math.sin(psi), math.cos(psi)]])
-    vel = 1
-    dist = .21 
-    offset = .1
+    vel = .6
+    dist = .116 
+    offset = .065   
     
     if code == 0:
         rel_start = np.array([-offset, -dist])
@@ -136,17 +136,25 @@ class Game:
         # Show output in simulation
         if show_simulation:
             self.S_verbose.setState(self.C.getFrameState())
+            # for t in range(10):
+            #     self.S_verbose.step([], 4*self.tau,  ry.ControlMode.none)
 
             for t in range(3):
                 time.sleep(self.tau)
+                # if t<3:
                 self.S_verbose.step(direction, self.tau,  ry.ControlMode.velocity)
+                # else:
+                # self.S_verbose.step([], self.tau,  ry.ControlMode.none)
 
         else:
             self.S.setState(self.C.getFrameState())
 
-            for t in range(3):
+            for t in range(6):
                 # time.sleep(self.tau)
+                # if t<3:
                 self.S.step(direction, self.tau,  ry.ControlMode.velocity)
+                # else:
+                # self.S_verbose.step([], self.tau,  ry.ControlMode.none)
         
         
         self.calculate_state();
@@ -172,7 +180,7 @@ class Game:
         elif r < 0.1:
             self.r_target_hits += 1
             # Define desired more precise positioning 
-            if r < 0.01 or self.r_target_hits > 10:
+            if r < 0.01 or self.r_target_hits > 5:
                 print("Scored position: ", r)
                 game_over = True
                 # Introduce better rewards for more precise positioning 
@@ -190,9 +198,11 @@ class Game:
         # Bias for movements towards the goal
         # update discrete states:
         if abs(dangle) < abs(self.prev_dangle):
+            reward+=.02
             self.prev_dangle = dangle
 
         if dr <  self.prev_dr:
+            reward+=.02
             self.prev_dr = dr
 
         # reset variables
@@ -206,8 +216,9 @@ class Game:
     
     def reset(self):
         #define the new state of the box to be somewhere around the target:
-        new_state = np.array(self.box_t.getPosition())+np.array([3*np.random.rand() - 1.5, 3*np.random.rand() - 1.5, 0])
-        
+        reset_max_dist = 1.5
+        new_state = np.array(self.box_t.getPosition())+np.array([reset_max_dist*np.random.rand() - reset_max_dist/2, reset_max_dist*np.random.rand() - reset_max_dist/2, 0])
+
         self.box.setQuaternion(psi_to_quat(2*math.pi*np.random.rand()))
         self.box.setPosition(new_state)
         self.S.setState(self.C.getFrameState())
@@ -266,10 +277,10 @@ class Worker:
 
                     # logging
                     log_freq = 100,
-                    log_dir = "data/local/game2",
+                    log_dir = "data/local/game3",
                     
                     # simulation verbose
-                    sim_verbose_freq_episodes = 20
+                    sim_verbose_freq_episodes = 100
                 ):
 
         lib.logger.session(log_dir).__enter__()
@@ -462,6 +473,6 @@ if __name__ == "__main__":
     if EVALUATION:
         setup.evaluate_model(model_filename = 'model_saved2.pth')
     elif WARM_START:
-        setup.train_warm_start(model_filename = 'model_saved2.pth')
+        setup.train_warm_start(model_filename = 'model.pth')
     else:
         setup.train()
