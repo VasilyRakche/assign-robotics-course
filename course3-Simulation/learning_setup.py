@@ -177,10 +177,10 @@ class Game:
             print("Negative reward for position distance increase: ", reward)
             self.prev_dr = dr
             
-        elif r < 0.1:
+        elif r < 0.05:
             self.r_target_hits += 1
             # Define desired more precise positioning 
-            if r < 0.01 or self.r_target_hits > 5:
+            if r < 0.01 or self.r_target_hits > 2:
                 print("Scored position: ", r)
                 game_over = True
                 # Introduce better rewards for more precise positioning 
@@ -467,7 +467,7 @@ class Worker:
 
             
 EVALUATION = False
-WARM_START = True
+WARM_START = False
 if __name__ == "__main__":
     setup = Worker()
     if EVALUATION:
